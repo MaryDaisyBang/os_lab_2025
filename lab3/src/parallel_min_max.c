@@ -1,4 +1,3 @@
-cat > parallel_min_max.c << 'EOF'
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -95,6 +94,8 @@ int main(int argc, char **argv) {
   GenerateArray(array, array_size, seed);
 
   int pipes[pnum][2];
+  pid_t child_pids[pnum];
+  
   if (!with_files) {
     for (int i = 0; i < pnum; i++) {
       if (pipe(pipes[i]) == -1) {
@@ -113,12 +114,17 @@ int main(int argc, char **argv) {
   for (int i = 0; i < pnum; i++) {
     pid_t child_pid = fork();
     if (child_pid >= 0) {
+      child_pids[i] = child_pid;
       if (child_pid == 0) {
         // Child process
         int start = i * chunk_size;
         int end = (i == pnum - 1) ? array_size : start + chunk_size;
 
         struct MinMax min_max = GetMinMax(array, start, end);
+
+        printf("DEBUG Child %d: min=%d, max=%d, start=%d, end=%d\n", 
+               i, min_max.min, min_max.max, start, end);
+        fflush(stdout);
 
         if (with_files) {
           char filename[64];
@@ -127,18 +133,18 @@ int main(int argc, char **argv) {
           if (f) {
             fprintf(f, "%d %d\n", min_max.min, min_max.max);
             fclose(f);
+            printf("DEBUG Child %d: wrote to %s\n", i, filename);
+            fflush(stdout);
           } else {
             perror("Failed to open file");
           }
         } else {
           close(pipes[i][0]);
-          if (write(pipes[i][1], &min_max.min, sizeof(int)) != sizeof(int)) {
-            perror("Failed to write min");
-          }
-          if (write(pipes[i][1], &min_max.max, sizeof(int)) != sizeof(int)) {
-            perror("Failed to write max");
-          }
+          write(pipes[i][1], &min_max.min, sizeof(int));
+          write(pipes[i][1], &min_max.max, sizeof(int));
           close(pipes[i][1]);
+          printf("DEBUG Child %d: wrote to pipe\n", i);
+          fflush(stdout);
         }
         
         free(array);
@@ -151,7 +157,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Parent process - collect results
+  // Parent process - wait for ALL children first
+  for (int i = 0; i < pnum; i++) {
+    int status;
+    waitpid(child_pids[i], &status, 0);
+    printf("DEBUG Parent: child %d finished\n", i);
+    fflush(stdout);
+  }
+
+  // Now read results
   struct MinMax min_max;
   min_max.min = INT_MAX;
   min_max.max = INT_MIN;
@@ -159,40 +173,27 @@ int main(int argc, char **argv) {
   for (int i = 0; i < pnum; i++) {
     int min = INT_MAX;
     int max = INT_MIN;
-    int status;
-    
-    // Wait for specific child
-    pid_t pid = wait(&status);
-    if (pid == -1) {
-      perror("wait failed");
-      continue;
-    }
 
     if (with_files) {
       char filename[64];
       snprintf(filename, sizeof(filename), "temp_%d.txt", i);
       FILE *f = fopen(filename, "r");
       if (f) {
-        if (fscanf(f, "%d %d", &min, &max) != 2) {
-          fprintf(stderr, "Failed to read from %s\n", filename);
-        }
+        fscanf(f, "%d %d", &min, &max);
         fclose(f);
         remove(filename);
+        printf("DEBUG Parent: read from %s: min=%d, max=%d\n", filename, min, max);
+        fflush(stdout);
       } else {
         perror("Failed to open file for reading");
       }
     } else {
       close(pipes[i][1]);
-      ssize_t bytes_read;
-      bytes_read = read(pipes[i][0], &min, sizeof(int));
-      if (bytes_read != sizeof(int)) {
-        fprintf(stderr, "Failed to read min from pipe %d\n", i);
-      }
-      bytes_read = read(pipes[i][0], &max, sizeof(int));
-      if (bytes_read != sizeof(int)) {
-        fprintf(stderr, "Failed to read max from pipe %d\n", i);
-      }
+      read(pipes[i][0], &min, sizeof(int));
+      read(pipes[i][0], &max, sizeof(int));
       close(pipes[i][0]);
+      printf("DEBUG Parent: read from pipe %d: min=%d, max=%d\n", i, min, max);
+      fflush(stdout);
     }
 
     if (min < min_max.min) min_max.min = min;
@@ -214,4 +215,3 @@ int main(int argc, char **argv) {
   
   return 0;
 }
-EOF
