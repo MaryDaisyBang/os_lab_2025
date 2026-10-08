@@ -101,14 +101,11 @@ int main(int argc, char **argv) {
 
   int chunk_size = array_size / pnum;
 
-  // ШАГ 1: Создаем все дочерние процессы
   for (int i = 0; i < pnum; i++) {
     pid_t child_pid = fork();
     if (child_pid == 0) {
-      // === Дочерний процесс ===
       int start = i * chunk_size;
       int end = (i == pnum - 1) ? array_size : start + chunk_size;
-
       struct MinMax min_max = GetMinMax(array, start, end);
 
       if (with_files) {
@@ -120,12 +117,11 @@ int main(int argc, char **argv) {
           fclose(f);
         }
       } else {
-        close(pipes[i][0]); // Закрываем чтение в ребенке
+        close(pipes[i][0]);
         write(pipes[i][1], &min_max.min, sizeof(int));
         write(pipes[i][1], &min_max.max, sizeof(int));
-        close(pipes[i][1]); // Закрываем запись в ребенке
+        close(pipes[i][1]);
       }
-      
       free(array);
       return 0;
     } else if (child_pid < 0) {
@@ -135,20 +131,16 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ШАГ 2: Родитель сразу закрывает ВСЕ концы каналов для записи!
-  // Это критически важно, чтобы read() не блокировался вечно.
   if (!with_files) {
     for (int i = 0; i < pnum; i++) {
       close(pipes[i][1]);
     }
   }
 
-  // ШАГ 3: Ждем завершения ВСЕХ дочерних процессов (порядок не важен)
   for (int i = 0; i < pnum; i++) {
     wait(NULL);
   }
 
-  // ШАГ 4: Теперь безопасно читаем результаты по порядку
   struct MinMax min_max;
   min_max.min = INT_MAX;
   min_max.max = INT_MIN;
@@ -167,7 +159,6 @@ int main(int argc, char **argv) {
         remove(filename);
       }
     } else {
-      // Читаем из канала (он уже готов, так как все дети завершились)
       read(pipes[i][0], &min, sizeof(int));
       read(pipes[i][0], &max, sizeof(int));
       close(pipes[i][0]);
