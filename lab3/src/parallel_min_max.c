@@ -1,3 +1,4 @@
+cat > parallel_min_max.c << 'EOF'
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -5,11 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include <fcntl.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-
 #include <getopt.h>
 
 #include "find_min_max.h"
@@ -23,7 +23,6 @@ int main(int argc, char **argv) {
 
   while (true) {
     int current_optind = optind ? optind : 1;
-
     static struct option options[] = {{"seed", required_argument, 0, 0},
                                       {"array_size", required_argument, 0, 0},
                                       {"pnum", required_argument, 0, 0},
@@ -40,34 +39,38 @@ int main(int argc, char **argv) {
         switch (option_index) {
           case 0:
             seed = atoi(optarg);
-            // your code here
-            // error handling
+            if (seed <= 0) {
+              printf("seed must be a positive number\n");
+              return 1;
+            }
             break;
           case 1:
             array_size = atoi(optarg);
-            // your code here
-            // error handling
+            if (array_size <= 0) {
+              printf("array_size must be a positive number\n");
+              return 1;
+            }
             break;
           case 2:
             pnum = atoi(optarg);
-            // your code here
-            // error handling
+            if (pnum <= 0) {
+              printf("pnum must be a positive number\n");
+              return 1;
+            }
             break;
           case 3:
             with_files = true;
             break;
-
-          defalut:
+          default:
             printf("Index %d is out of options\n", option_index);
+            return 1;
         }
         break;
       case 'f':
         with_files = true;
         break;
-
       case '?':
         break;
-
       default:
         printf("getopt returned character code 0%o?\n", c);
     }
@@ -79,48 +82,76 @@ int main(int argc, char **argv) {
   }
 
   if (seed == -1 || array_size == -1 || pnum == -1) {
-    printf("Usage: %s --seed \"num\" --array_size \"num\" --pnum \"num\" \n",
-           argv[0]);
+    printf("Usage: %s --seed \"num\" --array_size \"num\" --pnum \"num\" [--by_files]\n", argv[0]);
     return 1;
   }
 
   int *array = malloc(sizeof(int) * array_size);
+  if (array == NULL) {
+    printf("Memory allocation failed\n");
+    return 1;
+  }
+  
   GenerateArray(array, array_size, seed);
-  int active_child_processes = 0;
+
+  int pipes[pnum][2];
+  if (!with_files) {
+    for (int i = 0; i < pnum; i++) {
+      if (pipe(pipes[i]) == -1) {
+        perror("Pipe creation failed");
+        free(array);
+        return 1;
+      }
+    }
+  }
 
   struct timeval start_time;
   gettimeofday(&start_time, NULL);
 
+  int chunk_size = array_size / pnum;
+
   for (int i = 0; i < pnum; i++) {
     pid_t child_pid = fork();
     if (child_pid >= 0) {
-      // successful fork
-      active_child_processes += 1;
       if (child_pid == 0) {
-        // child process
+        // Child process
+        int start = i * chunk_size;
+        int end = (i == pnum - 1) ? array_size : start + chunk_size;
 
-        // parallel somehow
+        struct MinMax min_max = GetMinMax(array, start, end);
 
         if (with_files) {
-          // use files here
+          char filename[64];
+          snprintf(filename, sizeof(filename), "temp_%d.txt", i);
+          FILE *f = fopen(filename, "w");
+          if (f) {
+            fprintf(f, "%d %d\n", min_max.min, min_max.max);
+            fclose(f);
+          } else {
+            perror("Failed to open file");
+          }
         } else {
-          // use pipe here
+          close(pipes[i][0]);
+          if (write(pipes[i][1], &min_max.min, sizeof(int)) != sizeof(int)) {
+            perror("Failed to write min");
+          }
+          if (write(pipes[i][1], &min_max.max, sizeof(int)) != sizeof(int)) {
+            perror("Failed to write max");
+          }
+          close(pipes[i][1]);
         }
+        
+        free(array);
         return 0;
       }
-
     } else {
       printf("Fork failed!\n");
+      free(array);
       return 1;
     }
   }
 
-  while (active_child_processes > 0) {
-    // your code here
-
-    active_child_processes -= 1;
-  }
-
+  // Parent process - collect results
   struct MinMax min_max;
   min_max.min = INT_MAX;
   min_max.max = INT_MIN;
@@ -128,11 +159,40 @@ int main(int argc, char **argv) {
   for (int i = 0; i < pnum; i++) {
     int min = INT_MAX;
     int max = INT_MIN;
+    int status;
+    
+    // Wait for specific child
+    pid_t pid = wait(&status);
+    if (pid == -1) {
+      perror("wait failed");
+      continue;
+    }
 
     if (with_files) {
-      // read from files
+      char filename[64];
+      snprintf(filename, sizeof(filename), "temp_%d.txt", i);
+      FILE *f = fopen(filename, "r");
+      if (f) {
+        if (fscanf(f, "%d %d", &min, &max) != 2) {
+          fprintf(stderr, "Failed to read from %s\n", filename);
+        }
+        fclose(f);
+        remove(filename);
+      } else {
+        perror("Failed to open file for reading");
+      }
     } else {
-      // read from pipes
+      close(pipes[i][1]);
+      ssize_t bytes_read;
+      bytes_read = read(pipes[i][0], &min, sizeof(int));
+      if (bytes_read != sizeof(int)) {
+        fprintf(stderr, "Failed to read min from pipe %d\n", i);
+      }
+      bytes_read = read(pipes[i][0], &max, sizeof(int));
+      if (bytes_read != sizeof(int)) {
+        fprintf(stderr, "Failed to read max from pipe %d\n", i);
+      }
+      close(pipes[i][0]);
     }
 
     if (min < min_max.min) min_max.min = min;
@@ -151,5 +211,7 @@ int main(int argc, char **argv) {
   printf("Max: %d\n", min_max.max);
   printf("Elapsed time: %fms\n", elapsed_time);
   fflush(NULL);
+  
   return 0;
 }
+EOF
