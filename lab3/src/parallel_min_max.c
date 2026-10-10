@@ -1,4 +1,4 @@
-
+cat > parallel_min_max.c << 'EOF'
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -183,3 +183,4 @@ int main(int argc, char **argv) {
   
   return 0;
 }
+EOF
